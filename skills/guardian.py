@@ -1,9 +1,8 @@
 """LYA's conscience — the Ultron safety layer.
-Before any destructive/secure action, LYA checks herself AND re-verifies
-your face + voice. If you ask her to do something harmful, she refuses
-and explains why — like you asked."""
-import datetime
-from vision import face_auth
+Action logs are encrypted so a snooper can't see what commands were run."""
+import datetime, os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from security import vault
 
 DANGEROUS = ["format", "del /", "rm -rf", "rmdir", "shutdown", "reg delete",
              "diskpart", "cipher /w", "vssadmin delete", "bcdedit"]
@@ -35,5 +34,8 @@ def correct_user(text):
     return None
 
 def log_action(cmd, allowed):
-    with open("lya_actions.log", "a", encoding="utf-8") as f:
-        f.write(f"{datetime.datetime.now().isoformat()} | {'ALLOWED' if allowed else 'BLOCKED'} | {cmd}\n")
+    enc = os.path.join(os.path.dirname(__file__), "lya_actions.log.lya")
+    entry = f"{datetime.datetime.now().isoformat()} | {'ALLOWED' if allowed else 'BLOCKED'} | {cmd}\n"
+    history = vault.decrypt_file(enc).decode() if os.path.exists(enc) else ""
+    with open(enc, "wb") as f:
+        f.write(vault.encrypt((history + entry).encode()))

@@ -1,5 +1,16 @@
 # LYA — your personal ULTRON-level assistant
 
+## Security — her brain is fully encrypted
+Everything LYA knows is encrypted with AES-256 before touching the disk:
+- Memory DB (`lya_brain.db.lya`) — facts, conversations, admin identity
+- Face template (`admin_face.npy.lya`) — your biometric data
+- Action logs (`lya_actions.log.lya`) — command history
+- The AES key itself is protected by **Windows DPAPI**, bound to YOUR Windows user account.
+  Copying the files to another PC or user account = useless garbage.
+- Working copies are **secure-deleted** (overwritten with random bytes) after every use.
+
+Verify yourself: `python security_test.py`
+
 ## Her brain on a simple laptop — GROQ (free, no GPU needed)
 LYA's thinking happens in the cloud so your laptop does nothing heavy.
 1. Free account at https://console.groq.com (no credit card)

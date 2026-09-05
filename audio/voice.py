@@ -65,10 +65,51 @@ def listen(timeout=6):
     except (sr.UnknownValueError, sr.WaitTimeoutError, sr.RequestError, Exception):
         return None
 
-def wake_loop(on_wake):
-    """Main loop: sleeps until 'LYA' is spoken, then hands control to on_wake."""
-    speak("LYA online. Say my name when you need me.")
+def _double_clap(audio_bytes):
+    """Detect TWO sharp hand-claps in recorded WAV bytes (transient spikes
+    0.08-1.5s apart, each far louder than the background). Returns True/False."""
+    try:
+        buf = io.BytesIO(audio_bytes)
+        with wave.open(buf, "rb") as w:
+            rate = w.getframerate()
+            data = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(np.float32)
+        # envelope in 10 ms hops
+        hop = rate // 100
+        env = np.array([np.abs(data[i:i+hop]).max() for i in range(0, len(data) - hop, hop)])
+        if len(env) == 0:
+            return False
+        floor = np.percentile(env, 30) + 1e-6      # background level
+        thr = max(floor * 6, 6000)                 # a clap is LOUD + sudden
+        hits = env > thr
+        # collapse consecutive hot hops into clap events
+        events, prev = [], -10
+        for i, h in enumerate(hits):
+            if h and i - prev > 8:                 # 80ms refractory = new clap
+                events.append(i); prev = i
+        # keep only sharp attacks (claps rise in one hop, speech doesn't)
+        sharp = [i for i in events if i > 0 and env[i] > env[max(0, i-2)] * 2]
+        for a in range(len(sharp) - 1):
+            gap = (sharp[a+1] - sharp[a]) / 100.0  # seconds between claps
+            if 0.08 <= gap <= 1.5:
+                return True
+        return False
+    except Exception:
+        return False
+
+def wake_loop(on_wake, clap_enabled=True):
+    """Main loop: wakes on 'LYA' (voice) OR a double clap, then hands control
+    to on_wake — like Face ID, the interface only appears when summoned."""
+    speak("LYA online. Say my name or clap twice when you need me.")
     while True:
-        text = listen(timeout=8)
-        if text and any(w in text for w in WAKE_WORDS):
+        wav = _record(6)
+        if clap_enabled and _double_clap(wav.getvalue()):
+            print("[LYA] double clap detected")
             on_wake()
+            continue
+        try:
+            audio = sr.AudioData(wav.getvalue(), 16000, 2)
+            text = sr.Recognizer().recognize_google(audio).lower()
+            if text and any(w in text for w in WAKE_WORDS):
+                on_wake()
+        except Exception:
+            pass

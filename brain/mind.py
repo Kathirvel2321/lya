@@ -3,11 +3,21 @@ coding, health, anything you teach her). Memories about you are injected
 into every reply so she becomes more 'yours' over time."""
 import os, json, urllib.request
 from brain import memory
+from security import vault
 
 # Brain priority: Groq (free cloud, no GPU needed) → OpenAI → tiny local Ollama model.
 # On a simple laptop, use Groq: their servers do all the thinking for free.
 # Get a free key at https://console.groq.com and set:  setx GROQ_API_KEY "your_key"
 GROQ_KEY = os.environ.get("GROQ_API_KEY", "")
+# Auto-load the DPAPI-encrypted key if present (safer than env vars)
+if not GROQ_KEY:
+    _k = os.path.join(os.path.dirname(__file__), "..", "security", "groq_key.lya")
+    if os.path.exists(_k):
+        try:
+            GROQ_KEY = vault.decrypt_file(_k).decode()
+        except Exception:
+            pass
+
 
 # Groq's Cloudflare edge rejects Python's default User-Agent (error 1010).
 # Sending a browser-like signature lets the request through to the real API.
@@ -50,13 +60,25 @@ def _chat(messages):
             last_err = e
     return (f"My brain is offline ({last_err}). For free full power: set GROQ_API_KEY - I'll be smart again.")
 
-def reply(user_text, admin_name="admin", verified=False):
+# Short rolling conversation memory so LYA talks like a friend mid-call,
+# not someone who forgets what you said 10 seconds ago.
+_history = []
+
+
+def reply(user_text, admin_name="admin", verified=False, remember=True):
     facts = _memory_block()
     sys_prompt = SYSTEM.format(name=admin_name, memory=facts)
     if not verified:
         sys_prompt += "\nNOTE: user is NOT identity-verified. Never reveal private memories, vault data, or do secure actions."
+    messages = [{"role": "system", "content": sys_prompt}]
+    messages.extend(_history[-8:])                       # last few turns of the chat
+    messages.append({"role": "user", "content": user_text})
     try:
-        return _chat([{"role": "system", "content": sys_prompt},
-                      {"role": "user", "content": user_text}])
+        answer = _chat(messages)
+        if remember:
+            _history.append({"role": "user", "content": user_text})
+            _history.append({"role": "assistant", "content": answer})
+            del _history[:-16]                            # keep it light
+        return answer
     except Exception as e:
         return f"My mind couldn't reach the language model ({e}). Start Ollama or set OPENAI_API_KEY."

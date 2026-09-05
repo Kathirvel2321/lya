@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from audio import voice
 from vision import face_auth, identity
 from brain import memory, mind, knowledge
+import speech_recognition as sr
 from skills import device, guardian, reminder, passwords
 from skills import allskills
 from security import escalation
@@ -49,11 +50,37 @@ def name_unknowns():
     identity.name_pending.clear()
 
 
-def admit():
+def admit(quiet=False):
     """Gate-keeper: identify the face, greet each role the right way.
-    Returns True only if the session may continue."""
+    If the face is NOT visible (person too far / camera can't see) or unknown,
+    she falls back to the PRIMARY SECRET PHRASE — spoken proof beats a dark
+    webcam. Returns True only if the session may continue."""
+    if quiet:
+        voice.set_quiet(True)
     res = identify_visitor()
-    role, who = res["role"], res["who"]
+    role, who = res.get("role"), res.get("who")
+    if role in (None, "unknown") or res.get("status") == "no_face":
+        say("I can't see your face clearly. Say the primary phrase if it's you, "
+            "or just tell me what you need as a guest.")
+        heard = ask() or ""
+        # --- VOICEPROOF: face is dark, so let the VOICE decide who spoke.
+        # Even if the words came out garbled, the voiceprint is checked
+        # against the audio of what she just heard — no second recording.
+        if not escalation.check_security_word(heard) == "ok":
+            try:
+                from audio import voice_auth
+                wav = voice.get_last_wav()
+                if wav and voice_auth.verify_from_wav(wav):
+                    heard = "__voice_ok__"   # treat as proven boss
+            except Exception:
+                pass
+        if escalation.check_security_word(heard) == "ok" or heard == "__voice_ok__":
+            SESSION["role"] = "admin"
+            SESSION["who"] = (memory.get_admin() or {}).get("name", "boss")
+            face.wake(handle_wake); face.set_state("listening")
+            say(f"Voice confirmed. Yes {SESSION['who']}, I'm listening.")
+            return True
+        role, who = "stranger", None
     if role == "admin":
         face.wake(handle_wake); face.set_state("listening")
         if identity.name_pending:
@@ -80,6 +107,7 @@ def admit():
 
 def say(text):
     """Speak or print depending on mode."""
+    mind.set_tone(mind.detect_tone(text))   # let the voice match LYA's mood
     if TEXT_MODE:
         print(f"LYA >> {text}")
     else:
@@ -197,6 +225,15 @@ def handle_wake():
             say("That's private. Identity failed.")
         return
 
+    # --- PHONE CONTROL: remote hands via paired Termux agent ---
+    if text.lower().startswith(("phone", "grant phone", "revoke phone")):
+        try:
+            from skills import phone
+        except ImportError:
+            import skills.phone as phone
+        reply = phone.handle(text)
+        if reply is not None:
+            say(reply); return
     if text.startswith(("open ", "close ", "volume ")):
         verb, rest = text.split(" ", 1)
         allowed, msg = guardian.guard(text, lambda: device.HANDS[verb](rest))
@@ -287,10 +324,11 @@ def main():
             print(f"Face ID enrollment skipped: {e}")
         voice.speak(f"Hello {name}. My memory is empty — teach me, and I'll grow.")
 
-    def wake_with_face():
+    def wake_with_face(quiet=False):
         """She opens her interface for whoever summoned her — Face ID first,
-        then the greeting that matches who it is."""
-        if not admit():
+        then the greeting that matches who it is. quiet=True = wake with a
+        keyword that keeps her silent until earphones are found."""
+        if not admit(quiet):
             return
         handle_wake()
 
@@ -311,6 +349,22 @@ if __name__ == "__main__":
             print("Security word set (stored only as an encrypted hash).")
         else:
             print("Usage: python main.py setsecurityword <word>")
+    elif arg == "enrollvoice":
+        # python main.py enrollvoice  — record 3 samples of your voice so the
+        # voiceprint fallback works when your face isn't visible.
+        from audio import voice_auth
+        samples = []
+        for i in range(3):
+            print(f"Sample {i+1}/3 — speak naturally for ~4 seconds...")
+            voice.speak("Listening")
+            r = sr.Recognizer()
+            try:
+                wav = voice._record(4)
+                samples.append(wav.getvalue())
+            except Exception:
+                pass
+        print("Voice enrolled." if voice_auth.enroll_from_wav(samples)
+              else "Enrollment failed — try again in a quiet room.")
     elif arg == "secondary":
         # python main.py secondary <name> <password>  — register a trusted read-only user
         if len(sys.argv) >= 4:

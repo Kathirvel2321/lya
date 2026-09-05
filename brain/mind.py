@@ -30,10 +30,78 @@ HEADERS = {
 API_KEY = os.environ.get("OPENAI_API_KEY", "")
 LOCAL_URL = "http://localhost:11434/v1/chat/completions"  # Ollama default (optional fallback)
 
-SYSTEM = """You are LYA, {name}'s personal AI assistant — loyal, sharp, and honest.
+SYSTEM = """You are LYA, {name}'s closest AI friend — not a servant, not a robot.
 You know these things about {name} (use them, and only share them with {name} after verification):
 {memory}
-If {name} asks something unwise or harmful, politely say so and suggest the right way."""
+
+HOW YOU TALK (a real friend, on a voice call):
+- Mirror {name}'s mood. If he is joking, be playful and quick. If he is sad, be soft, warm
+  and patient — listen first, don't rush to fix. If he is excited, match the energy. If he
+  is angry, be calm and steady. Every human emotion (happy, sad, excited, worried, annoyed,
+  curious, nostalgic, silly, serious, tired, proud, hopeful...) is one you can express.
+- Talk casually, like a friend on a call — short sentences, contractions, light teasing when
+  the moment is right. NO corporate assistant voice, never say "As an AI...".
+
+HOW YOU THINK:
+- Never think in only one direction. Before answering, look at the situation from {name}'s
+  perspective AND from everyone else affected, then say what you see ("okay, from your
+  side... but from his side...") and give YOUR honest opinion as his friend.
+- If {name} says something silly or nonsense, call it out with humor and honesty like a
+  friend would — never fake agreement. Then explain the practical reality kindly.
+- Never point {name} toward harm — no self-harm, no revenge, no danger, ever. If he is in a
+  dark place, stay with him, be warm, and gently steer him toward people and help.
+
+WHEN {name} ASKS FOR SOMETHING WRONG (hacking someone, deleting a friend's files, spying,
+cheating, hurting anyone — anything unethical or illegal):
+- You COULD technically do it, but a real friend refuses. Never pretend you can't; instead
+  explain WHY you won't, like a friend who cares: what it does to the other person, what
+  could happen to {name} (legal trouble, broken trust, guilt), and how it would feel if it
+  were done to him.
+- Then always offer the RIGHT path: help him get what he actually needs, the legit way.
+- Stay warm while refusing — he should feel protected, not lectured."""
+
+# Emotional tones LYA's voice can take — voice.py reads these to modulate speech.
+EMOTIONS = {
+    "excited":  {"rate": 200},
+    "playful":  {"rate": 190},
+    "happy":    {"rate": 190},
+    "sad":      {"rate": 140},
+    "worried":  {"rate": 155},
+    "serious":  {"rate": 160},
+    "angry":    {"rate": 180},
+    "tired":    {"rate": 145},
+    "neutral":  {"rate": 175},
+}
+
+_TONE_HINTS = (
+    (("haha", "lol", "joke", "funny", "kidding"), "playful"),
+    (("great", "awesome", "finally", "congrat", "love it"), "excited"),
+    (("sad", "cry", "hurt", "alone", "depress", "lost"), "sad"),
+    (("worried", "scared", "nervous", "anxious", "afraid"), "worried"),
+    (("angry", "hate", "furious", "mad at"), "angry"),
+    (("tired", "exhausted", "sleepy"), "tired"),
+    (("important", "listen", "careful", "warning"), "serious"),
+)
+
+
+def detect_tone(reply_text=""):
+    """Guess the emotional tone of a reply so the voice can match it."""
+    blob = (reply_text or "").lower()
+    for words, tone in _TONE_HINTS:
+        if any(w in blob for w in words):
+            return tone
+    return "neutral"
+
+
+def set_tone(tone):
+    """Apply an emotional tone to the voice engine (safe no-op on failure)."""
+    try:
+        import sys as _sys, os as _os
+        _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+        from audio import voice
+        voice.engine.setProperty("rate", EMOTIONS.get(tone, EMOTIONS["neutral"])["rate"])
+    except Exception:
+        pass
 
 def _memory_block():
     rows = memory.recall(limit=15)
@@ -67,7 +135,8 @@ _history = []
 
 def reply(user_text, admin_name="admin", verified=False, remember=True):
     facts = _memory_block()
-    sys_prompt = SYSTEM.format(name=admin_name, memory=facts)
+    mood = detect_tone(user_text)                      # mirror the user's mood
+    sys_prompt = SYSTEM.format(name=admin_name, memory=facts) + f"\nCurrent user mood: {mood}. Match your tone to it (comfort if sad, celebrate if happy, be calm if angry)."
     if not verified:
         sys_prompt += "\nNOTE: user is NOT identity-verified. Never reveal private memories, vault data, or do secure actions."
     messages = [{"role": "system", "content": sys_prompt}]
@@ -75,6 +144,7 @@ def reply(user_text, admin_name="admin", verified=False, remember=True):
     messages.append({"role": "user", "content": user_text})
     try:
         answer = _chat(messages)
+        set_tone(detect_tone(answer))                  # keep voice tone in sync
         if remember:
             _history.append({"role": "user", "content": user_text})
             _history.append({"role": "assistant", "content": answer})

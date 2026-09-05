@@ -225,6 +225,11 @@ def handle(text):
 # ---------------- SKILL-ROUTER ADAPTER ----------------
 def match(text):
     """True if this looks like a hacker-suite command (allskills.py calls this)."""
+    t = text.lower().strip()
+    # the trainer (learnhack.py) owns lesson/mission commands — never steal them
+    if "hacker lesson" in t or "hacker mission" in t or t in (
+            "learn hacking", "hacking lessons", "hacker curriculum", "teach me hacking"):
+        return False
     return handle(text) is not None
 
 

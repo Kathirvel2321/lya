@@ -11,12 +11,31 @@ from security import vault
 
 STORE = os.path.join(os.path.dirname(__file__), "admin_face.npy.lya")
 
+# Jarvis-style hook: LYA's orb sets this so the scan shows up ONLY in her own
+# interface — never as a separate camera window. ui/orb.py installs it.
+_status_callback = None          # fn(state:str, detail:str) -> None
+
+def set_status_callback(fn):
+    ""Register a callback so LYA's interface shows 'scanning' states.
+    States: 'scanning' | 'scanned_ok' | 'scanned_fail'.""
+    global _status_callback
+    _status_callback = fn
+
+def _emit(state, detail=""):
+    if _status_callback:
+        try:
+            _status_callback(state, detail)
+        except Exception:
+            pass
+
 def enroll(name="admin"):
     """Run once to register your face. Look at the webcam when prompted."""
     cam = cv2.VideoCapture(0)
     detector = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
     frames = []
-    print(f"[LYA] {name}, look at the camera — enrolling your face (10 samples)...")
+    msg = f"{name}, look at the camera — enrolling your face (10 samples)..."
+    print(f"[LYA] {msg}")
+    _emit("scanning", msg)
     while len(frames) < 10:
         ok, frame = cam.read()
         if not ok: continue
@@ -25,17 +44,16 @@ def enroll(name="admin"):
         for (x, y, w, h) in faces:
             face = cv2.resize(gray[y:y+h, x:x+w], (128, 128))
             frames.append(face.astype(np.float32) / 255.0)
-            cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
-        cv2.imshow("LYA face enrollment", frame)
-        if cv2.waitKey(1) & 0xFF == 27: break
-    cam.release(); cv2.destroyAllWindows()
+        _emit("scanning", f"capturing {len(frames)}/10")
+    cam.release()
     if frames:
         mean_face = np.mean(frames, axis=0)
-        vault.encrypt_file.__doc__  # noqa — just to import check
         with open(STORE, "wb") as f:
             f.write(vault.encrypt(mean_face.tobytes()))
+        _emit("scanned_ok", "Face enrolled and encrypted")
         print("[LYA] Face enrolled and ENCRYPTED. I will recognize you now.")
         return True
+    _emit("scanned_fail", "No face seen")
     print("[LYA] Could not see your face. Try better lighting.")
     return False
 
@@ -85,7 +103,8 @@ def verify(threshold=0.12, tries=15):
     cam = cv2.VideoCapture(0)
     detector = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
     confirmed = 0
-    print("[LYA] Verifying your face...")
+    print("[LYA] Verifying your face... (invisible scan — no camera window)")
+    _emit("scanning", "Identity scan")
     while confirmed < 5 and tries > 0:
         tries -= 1
         ok, frame = cam.read()
@@ -95,12 +114,14 @@ def verify(threshold=0.12, tries=15):
         for (x, y, w, h) in faces:
             face = cv2.resize(gray[y:y+h, x:x+w], (128, 128)).astype(np.float32) / 255.0
             diff = np.mean(np.abs(face - stored))
-            cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0) if diff < threshold else (0, 0, 255), 2)
             if diff < threshold: confirmed += 1
-        cv2.putText(frame, f"match {confirmed}/5", (10, 30), 0, 0.8, (255, 255, 255), 2)
-        cv2.imshow("LYA verifying", frame)
-        if cv2.waitKey(1) & 0xFF == 27: break
-    cam.release(); cv2.destroyAllWindows()
+        _emit("scanning", f"match {confirmed}/5")
+    cam.release()
     ok = confirmed >= 5
-    print("[LYA] Identity", "CONFIRMED — welcome back." if ok else "REJECTED. Private data stays locked.")
+    if ok:
+        _emit("scanned_ok", "Welcome back")
+        print("[LYA] Identity CONFIRMED — welcome back.")
+    else:
+        _emit("scanned_fail", "Identity rejected")
+        print("[LYA] Identity REJECTED. Private data stays locked.")
     return ok

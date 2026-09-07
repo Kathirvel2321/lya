@@ -17,7 +17,8 @@ Returns the spoken reply, or None if no skill matched (so main.py falls through)
 """
 import re
 
-from skills import cooking, guiding, teaching, techno, hacker, autonomous, kali, learnhack
+from skills import (cooking, guiding, teaching, techno, hacker, autonomous,
+                    kali, learnhack, security_brain)
 
 _SKILLS = (
     (cooking.match,    cooking.reply),
@@ -26,6 +27,7 @@ _SKILLS = (
     (techno.match,     techno.reply),
     (hacker.match,     hacker.reply),
     (learnhack.match,  learnhack.reply),
+    (security_brain.match, security_brain.reply),
     (kali.match,       kali.reply),
     (autonomous.match, autonomous.reply),
 )

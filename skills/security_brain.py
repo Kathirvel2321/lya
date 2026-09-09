@@ -156,6 +156,32 @@ def _ingest_books():
         return ""
 
 # --------------------------------------------------------------- BUILD / LOAD
+BRAIN_MAX_AGE = 7 * 86400   # rebuild from live sources once a week
+
+def _brain_stale():
+    if not os.path.exists(OUT):
+        return True
+    try:
+        import time
+        return (time.time() - os.path.getmtime(OUT)) > BRAIN_MAX_AGE
+    except Exception:
+        return False
+
+def ensure_fresh():
+    """Rebuild in a BACKGROUND thread when the brain is older than a week.
+    Never blocks LYA — she keeps answering from the current brain meanwhile."""
+    if not _brain_stale():
+        return
+    import threading
+    def _bg():
+        try:
+            build()
+            global _cache
+            _cache = None          # force reload of the new brain
+        except Exception as e:
+            print(f"[security_brain] refresh failed: {e}")
+    threading.Thread(target=_bg, daemon=True).start()
+
 def build():
     print("Building LYA security brain (books + WSTG + PortSwigger + ATT&CK)...")
     text = (_ingest_books() + _ingest_wstg() + _ingest_labs() + _ingest_attack())
@@ -166,6 +192,7 @@ def build():
 _cache = None
 def _load():
     global _cache
+    ensure_fresh()
     if _cache is None:
         try:
             with gzip.open(OUT, "rt", encoding="utf-8") as f:

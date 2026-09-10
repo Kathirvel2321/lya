@@ -108,21 +108,21 @@ class AuthWall:
     def __init__(self, store_face_bytes, store_voice_bytes):
         self.store_face = face_embedding(store_face_bytes)
         self.store_voice = voice_embedding(store_voice_bytes)
-        self.store_face = vault.encrypt(self.store_face.tobytes())
-        self.store_voice = vault.encrypt(self.store_voice.tobytes())
+        self.store_face = vault.encrypt(self.store_face.astype(np.float32).tobytes())
+        self.store_voice = vault.encrypt(self.store_voice.astype(np.float32).tobytes())
 
     def verify(self, selfie_bytes, voice_bytes, phrase, voice_fmt="webm"):
         """Returns (ok, report). ALL THREE gates must pass."""
         report = []
         try:
             emb = face_embedding(selfie_bytes)
-            ok_f, sim = face_match(np.frombuffer(vault.decrypt(self.store_face)), emb)
+            ok_f, sim = face_match(np.frombuffer(vault.decrypt(self.store_face), dtype=np.float32), emb)
             report.append(f"face {'PASS' if ok_f else 'FAIL'} (similarity {sim:.2f})")
         except Exception as e:
             return False, f"face FAIL ({e})"
         try:
             emb = voice_embedding(voice_bytes, voice_fmt)
-            ok_v, sim = voice_match(np.frombuffer(vault.decrypt(self.store_voice)), emb)
+            ok_v, sim = voice_match(np.frombuffer(vault.decrypt(self.store_voice), dtype=np.float32), emb)
             report.append(f"voiceprint {'PASS' if ok_v else 'FAIL'} (similarity {sim:.2f})")
         except Exception as e:
             return False, f"voiceprint FAIL ({e})"

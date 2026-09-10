@@ -314,7 +314,7 @@ def reply(text, admin_name="admin", verified=False):
     """Answer the user WITH the right expert persona active."""
     persona, prompt = match(text) or ("Generalist", "")
     sys_extra = f"\nACTIVE SKILL: You are acting as a {persona}. {prompt}"
-    facts = mind._memory_block()
+    facts = mind._memory_block() if verified else "(private memory unavailable)"
     sys_prompt = mind.SYSTEM.format(name=admin_name, memory=facts) + sys_extra
     if not verified:
         sys_prompt += "\nNOTE: user is NOT identity-verified. Never reveal private memories or vault data."

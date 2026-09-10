@@ -138,6 +138,20 @@ def list_pending():
             for p in _load()["pending"]]
 
 
+def verify_owner(image_bytes, threshold=0.60):
+    """Explicit owner verification; never enroll or retain an unknown visitor."""
+    from security.liveness import face_liveness
+    live, _, reason = face_liveness(image_bytes)
+    if not live:
+        return False, reason
+    emb = auth_wall.face_embedding(image_bytes)
+    owners = [p for p in _load()["people"] if p["role"] == ADMIN]
+    if len(owners) != 1:
+        return False, "Exactly one enrolled primary admin is required."
+    score = max((_cos(emb, e) for e in owners[0]["embeddings"]), default=-1)
+    return score >= threshold, "Owner matched." if score >= threshold else "Owner not recognized."
+
+
 def pending_ids():
     """Stable IDs of un-named strangers. Stable because popping one must not
     renumber the rest — index-based IDs shift underneath a caller mid-loop."""

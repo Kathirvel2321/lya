@@ -13,12 +13,18 @@ APP_MAP = {
 }
 
 def open_app(name):
-    exe = APP_MAP.get(name.lower(), name)
+    # Only fixed executable names; user text is never interpolated into a shell.
+    apps = {"notepad": "notepad.exe", "calculator": "calc.exe",
+            "file explorer": "explorer.exe", "chrome": "chrome.exe"}
+    executable = apps.get(name.casefold().strip())
+    if not executable:
+        return "Supported apps: calculator, notepad, file explorer, chrome."
     try:
-        os.system(f"start {exe}")
-        return f"Opening {name}."
-    except Exception as e:
-        return f"Couldn't open {name}: {e}"
+        subprocess.Popen([executable])
+        return f"Launch requested for {name}."
+    except OSError as e:
+        return f"Could not launch {name}: {e}"
+
 
 def close_app(name):
     os.system(f"taskkill /f /im {name}.exe >nul 2>&1")
@@ -46,6 +52,8 @@ def run_command(cmd):
 
 def volume(action):
     key = {"up": "volumeup", "down": "volumedown", "mute": "volumemute"}.get(action)
+    if key is None:
+        return "Say volume up, volume down, or volume mute."
     pyautogui.press(key)
     return f"Volume {action}."
 

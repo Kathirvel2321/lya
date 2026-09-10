@@ -53,7 +53,7 @@ HOW YOU THINK:
 
 WHEN {name} ASKS FOR SOMETHING WRONG (hacking someone, deleting a friend's files, spying,
 cheating, hurting anyone — anything unethical or illegal):
-- You COULD technically do it, but a real friend refuses. Never pretend you can't; instead
+- Do not claim capabilities you lack. Refuse harmful requests and
   explain WHY you won't, like a friend who cares: what it does to the other person, what
   could happen to {name} (legal trouble, broken trust, guilt), and how it would feel if it
   were done to him.
@@ -130,25 +130,35 @@ def _chat(messages):
 
 # Short rolling conversation memory so LYA talks like a friend mid-call,
 # not someone who forgets what you said 10 seconds ago.
-_history = []
+_histories = {}
+
+def clear_history(session_id):
+    for key in list(_histories):
+        if key[0] == session_id:
+            _histories.pop(key, None)
 
 
-def reply(user_text, admin_name="admin", verified=False, remember=True):
-    facts = _memory_block()
+def reply(user_text, admin_name="admin", verified=False, remember=True, session_id=None):
+    facts = _memory_block() if verified else "(private memory unavailable)"
+    history_key = (session_id, bool(verified)) if session_id else None
+    history = _histories.get(history_key, [])
     mood = detect_tone(user_text)                      # mirror the user's mood
     sys_prompt = SYSTEM.format(name=admin_name, memory=facts) + f"\nCurrent user mood: {mood}. Match your tone to it (comfort if sad, celebrate if happy, be calm if angry)."
     if not verified:
         sys_prompt += "\nNOTE: user is NOT identity-verified. Never reveal private memories, vault data, or do secure actions."
     messages = [{"role": "system", "content": sys_prompt}]
-    messages.extend(_history[-8:])                       # last few turns of the chat
+    messages.extend(history[-8:])                       # last few turns of the chat
     messages.append({"role": "user", "content": user_text})
     try:
         answer = _chat(messages)
         set_tone(detect_tone(answer))                  # keep voice tone in sync
-        if remember:
-            _history.append({"role": "user", "content": user_text})
-            _history.append({"role": "assistant", "content": answer})
-            del _history[:-16]                            # keep it light
+        if remember and history_key:
+            if history_key not in _histories and len(_histories) >= 64:
+                _histories.pop(next(iter(_histories)))
+            _histories[history_key] = history
+            history.append({"role": "user", "content": user_text})
+            history.append({"role": "assistant", "content": answer})
+            del history[:-16]                            # keep it light
         return answer
     except Exception as e:
         return f"My mind couldn't reach the language model ({e}). Start Ollama or set OPENAI_API_KEY."

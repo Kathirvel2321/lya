@@ -1,4 +1,4 @@
-n """LYA TRAP DETECTION — she checks the ground BEFORE stepping on it.
+"""LYA TRAP DETECTION — she checks the ground BEFORE stepping on it.
 ====================================================================
 Before any network action (scan, block, connect), she looks for the
 classic waiting-traps an attacker sets on a network:
@@ -14,7 +14,6 @@ Every check is read-only observation of your own connection. If anything
 smells wrong, LYA REFUSES risky actions and warns you in plain words.
 """
 import os, json, subprocess, socket, time
-
 HERE = os.path.dirname(os.path.abspath(__file__))
 BASELINE = os.path.join(HERE, ".home_baseline.json")
 

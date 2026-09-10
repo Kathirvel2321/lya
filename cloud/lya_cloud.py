@@ -177,42 +177,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self): self._send(200, HTML)
 
     def do_POST(self):
-        data = parse_qs(self.rfile.read(int(self.headers.get("Content-Length", 0))).decode())
-        if data.get("token", [""])[0] != TOKEN:
-            return self._json(403, {"error": "wrong token"})
-        try:
-            if self.path == "/ask":
-                q = data.get("q", [""])[0].strip()
-                low = q.lower()
-                # Vault requests REQUIRE biometric verification
-                if any(w in low for w in ("password", "vault", "passphrase", "secret")):
-                    ok, msg = vault_unlock_check(
-                        selfie_b64=data.get("selfie", [None])[0],
-                        voice_b64=data.get("voice", [None])[0])
-                    if not ok:
-                        return self._json(200, {"reply": msg})
-                    # verified: read vault entries
-                    rows = [r for r in recall(limit=50) if r[2] == "vault"]
-                    return self._json(200, {"reply": msg + " " + "; ".join(
-                        f"{k}: {v}" for k, v, *_ in rows)})
-                return self._json(200, {"reply": lyas_answer(q)})
-
-            if self.path == "/enroll_biometrics":
-                selfie = data.get("selfie", [None])[0]
-                phrase = data.get("phrase", [""])[0].strip().lower()
-                if not selfie or not phrase:
-                    return self._json(400, {"error": "need selfie + phrase"})
-                sb_request("POST", "memories", {"kind": "biometric_face", "ekey": enc("owner"), "evalue": enc(selfie)})
-                sb_request("POST", "memories", {"kind": "biometric_phrase", "ekey": enc("owner"), "evalue": enc(phrase)})
-                return self._json(200, {"reply": "Biometrics enrolled and encrypted. The vault is yours."})
-
-            if self.path == "/verify_biometrics":
-                ok, msg = vault_unlock_check(data.get("selfie", [None])[0], data.get("voice", [None])[0])
-                return self._json(200, {"reply": msg, "verified": ok})
-
-            return self._json(404, {"error": "not found"})
-        except Exception as e:
-            return self._json(500, {"error": str(e)})
+        self._json(503, {"error": "Legacy cloud actions are disabled until the shared identity protocol is configured."})
 
     def log_message(self, *a): pass
 

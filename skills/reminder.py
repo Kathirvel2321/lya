@@ -134,12 +134,7 @@ def add(text):
               (vault.encrypt_text(what or "reminder"), vault.encrypt_text(when.isoformat()),
                datetime.datetime.now().isoformat()))
     _close(c)
-    # mirror to cloud so she can fire it even with the laptop off
-    try:
-        if sync:
-            sync.push_reminder(what or "reminder", when)
-    except Exception:
-        pass
+    # Cloud sync is deferred; adding a local reminder does not export its contents.
     return (f"Got it. I'll remind you '{what}' on "
             f"{when:%A, %d %B at %I:%M %p}. I won't forget.")
 

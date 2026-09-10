@@ -198,6 +198,21 @@ step2 = async function(){
   say(j.ok ? 'IDENTITY CONFIRMED - welcome, '+(j.name||'admin') : 'ACCESS DENIED: '+(j.error||''));
 }""")
 
+APPROVE_HTML = """<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Approve LYA task</title><style>body{font:18px system-ui;background:#10151c;color:#e6edf5;max-width:32rem;margin:auto;padding:24px}input,button{font:inherit;padding:12px;box-sizing:border-box;width:100%;margin:8px 0}video{width:100%}</style>
+<h1>Approve laptop task</h1><p id="task">Load the pending task before approving.</p>
+<input id="token" type="password" placeholder="Paired phone token" autocomplete="off">
+<button onclick="loadTask()">Load pending task</button>
+<video id="camera" autoplay muted playsinline></video>
+<input id="phrase" type="password" placeholder="Owner security phrase" autocomplete="off">
+<button id="approve" onclick="approveTask()" disabled>Verify and approve once</button><p id="status" role="status"></p>
+<script>
+let challenge=null,stream=null;
+async function post(path,extra={}){const body=new URLSearchParams({token:document.getElementById('token').value,...extra});const r=await fetch(path,{method:'POST',body});return r.json()}
+async function loadTask(){try{challenge=await post('/challenge');document.getElementById('task').textContent=challenge.task||challenge.error;if(!challenge.nonce)return;stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user'}});document.getElementById('camera').srcObject=stream;document.getElementById('approve').disabled=false}catch(e){document.getElementById('status').textContent='Camera unavailable. Use trusted HTTPS and allow camera access.'}}
+async function approveTask(){document.getElementById('approve').disabled=true;try{const v=document.getElementById('camera');const c=document.createElement('canvas');c.width=v.videoWidth;c.height=v.videoHeight;c.getContext('2d').drawImage(v,0,0);const r=await post('/escalate',{nonce:challenge.nonce,frame:c.toDataURL('image/jpeg',.85).split(',')[1],phrase:document.getElementById('phrase').value});document.getElementById('status').textContent=r.msg||r.error}catch(e){document.getElementById('status').textContent='Approval failed. Reload the task.'}finally{document.getElementById('phrase').value='';if(stream)stream.getTracks().forEach(t=>t.stop())}}
+</script>"""
+
 _NEEDS_FACE = ("That touches your private memory. Open /verify on this phone and "
                "show me your face first - the access token proves it's your "
                "phone, not that it's you holding it.")
@@ -254,14 +269,10 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body.encode())
 
     def do_GET(self):
+        if self.path in ("/escalate", "/verify"):
+            return self._send(200, APPROVE_HTML)
         if self.path == "/enroll":
-            return self._send(200, ENROLL_HTML)
-        if self.path == "/verify":
-            return self._send(200, VERIFY_HTML)
-        if self.path == "/escalate":
-            # Same face-check page, but it signals the PC's escalation gate
-            return self._send(200, VERIFY_HTML.replace("/verify_identity", "/escalate")
-                .replace("IDENTITY CONFIRMED", "TASK APPROVED"))
+            return self._send(403, "Enrollment is deferred.")
         return self._send(200, HTML)
 
     def _check_token(self, data):
@@ -273,96 +284,68 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def do_POST(self):
-        if self.path not in ("/ask", "/enroll_face", "/enroll_voice", "/verify_identity", "/escalate"):
+        if self.path not in ("/ask", "/challenge", "/escalate", "/verify_identity", "/enroll_face", "/enroll_voice"):
             return self._send(404, "not found")
-        data = parse_qs(self.rfile.read(int(self.headers["Content-Length"])).decode())
-        if not self._check_token(data):
-            return
-
-        if self.path == "/enroll_face":
-            try:
-                frames = json.loads(data.get("frames", ["[]"])[0])
-                jpgs = [_b64_to_bytes(f) for f in frames]
-                ok = face_auth.enroll_from_jpg(jpgs)
-                if ok and memory.get_admin() is None:
-                    memory.set_admin("admin", {"device": "iphone"})
-                return self._send(200, json.dumps({"ok": bool(ok),
-                    "error": "no face detected in the frames" if not ok else ""}), "application/json")
-            except Exception as e:
-                return self._send(200, json.dumps({"ok": False, "error": str(e)}), "application/json")
-
-        if self.path == "/enroll_voice":
-            try:
-                wav = _b64_to_bytes(data.get("wav", [""])[0])
-                ok = voice_auth.enroll_from_wav([wav])
-                return self._send(200, json.dumps({"ok": bool(ok),
-                    "error": "audio too short or unreadable" if not ok else ""}), "application/json")
-            except Exception as e:
-                return self._send(200, json.dumps({"ok": False, "error": str(e)}), "application/json")
-
-        if self.path == "/verify_identity":
-            frame = _b64_to_bytes(data.get("frame", [""])[0])
-            ok, dist = face_auth.verify_from_jpg(frame)
-            # voice adds a second factor when provided
-            if ok and "wav" in data:
-                wav = _b64_to_bytes(data["wav"][0])
-                if voice_auth.enrolled() and not voice_auth.verify_from_wav(wav):
-                    ok = False
-            if ok:
-                admin = memory.get_admin()
-                return self._send(200, json.dumps({"ok": True, "sid": _new_session(),
-                    "ttl": SESSION_TTL,
-                    "name": admin["name"] if admin else "admin"}), "application/json")
-            return self._send(200, json.dumps({"ok": False,
-                "error": f"face/voice not recognized (dist={dist:.3f})"}), "application/json")
-
-        if self.path == "/escalate":
-            """Phone-side approval for a sensitive task on the laptop.
-            Same face(+voice) check as /verify_identity; on success it writes
-            the one-time grant the laptop's escalation gate is waiting for."""
-            frame = _b64_to_bytes(data.get("frame", [""])[0])
-            ok, dist = face_auth.verify_from_jpg(frame)
-            if ok and "wav" in data:
-                wav = _b64_to_bytes(data["wav"][0])
-                if voice_auth.enrolled() and not voice_auth.verify_from_wav(wav):
-                    ok = False
-            if ok:
-                # nonce binds this approval to the laptop's current escalate() call
-                escalation.phone_approve(nonce=escalation.current_nonce())
-                return self._send(200, json.dumps({"ok": True,
-                    "msg": "approved - the laptop may proceed"}), "application/json")
-            return self._send(200, json.dumps({"ok": False,
-                "error": f"face/voice not recognized (dist={dist:.3f})"}), "application/json")
-
-        # /ask
-        q = data.get("q", [""])[0].strip()
-        verified = _session_valid(data.get("sid", [""])[0])
         try:
-            reply = lyas_answer(q, verified)
-        except Exception as e:
-            reply = f"My brain hiccuped: {e}"
-        self._send(200, json.dumps({"reply": reply, "verified": verified}),
-                   "application/json")
+            size = int(self.headers.get("Content-Length", "0"))
+            if not 0 < size <= 2_000_000:
+                return self._send(413, "Invalid request size")
+            data = parse_qs(self.rfile.read(size).decode())
+            if not self._check_token(data):
+                return
+            if self.path.startswith("/enroll"):
+                return self._send(403, json.dumps({"error": "Enrollment is deferred; a phone token cannot replace the owner."}), "application/json")
+            if self.path == "/challenge":
+                challenge = escalation.current_challenge()
+                return self._send(200, json.dumps(challenge or {"error": "No pending task."}), "application/json")
+            if self.path in ("/escalate", "/verify_identity"):
+                import ssl
+                if not isinstance(self.connection, ssl.SSLSocket):
+                    return self._send(403, json.dumps({"error": "Phone verification requires HTTPS."}), "application/json")
+                if escalation._locked_out():
+                    return self._send(429, json.dumps({"error": "Verification is locked. Try later."}), "application/json")
+                challenge = escalation.current_challenge()
+                nonce = data.get("nonce", [""])[0]
+                if not challenge or not hmac.compare_digest(nonce, challenge["nonce"]):
+                    return self._send(403, json.dumps({"error": "Task expired or changed. Refresh its details."}), "application/json")
+                from vision import identity
+                phrase = data.get("phrase", [""])[0]
+                ok = escalation.check_security_word(phrase) == "ok"
+                if ok:
+                    ok, detail = identity.verify_owner(_b64_to_bytes(data.get("frame", [""])[0]))
+                if not ok:
+                    escalation._record_failure()
+                    return self._send(403, json.dumps({"error": "Verification failed; task remains blocked."}), "application/json")
+                # Re-read after biometric processing: never approve a replacement task.
+                current = escalation.current_challenge()
+                if not current or not hmac.compare_digest(nonce, current["nonce"]):
+                    return self._send(403, json.dumps({"error": "Task expired."}), "application/json")
+                escalation.phone_approve(nonce=nonce)
+                escalation._reset_attempts()
+                return self._send(200, json.dumps({"ok": True, "msg": "Approved this task once."}), "application/json")
+            q = data.get("q", [""])[0].strip()
+            # Gateway chat has no private session and no executable skills.
+            return self._send(200, json.dumps({"reply": lyas_answer(q, verified=False), "verified": False}), "application/json")
+        except Exception:
+            return self._send(400, json.dumps({"error": "Request failed; no approval issued."}), "application/json")
 
     def log_message(self, *a):   # quiet logs
         pass
 
 def main():
-    port = 5000
-    srv = HTTPServer(("0.0.0.0", port), Handler)
-    ip = socket.gethostbyname(socket.gethostname())
-    print(f"""
-{'='*55}
-  LYA iPhone gateway running
-  On your iPhone (same WiFi):  http://{ip}:{port}
-  1. Open it in Safari
-  2. Share -> 'Add to Home Screen'
-  3. Paste your token when asked (shown above on first run)
-  4. First time only: open /enroll - capture face + voice
-  5. Every time someone wakes LYA: open /verify - face + voice check
-   6. When the laptop asks for a protected-task approval: open /escalate
-{'='*55}""")
+    import ssl
+    port = int(os.environ.get("LYA_PHONE_PORT", "5000"))
+    cert, key = os.environ.get("LYA_TLS_CERT"), os.environ.get("LYA_TLS_KEY")
+    if not cert or not key:
+        raise SystemExit("Configure LYA_TLS_CERT and LYA_TLS_KEY for trusted HTTPS before phone approval. Enrollment remains deferred.")
+    srv = HTTPServer((os.environ.get("LYA_PHONE_HOST", "127.0.0.1"), port), Handler)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(cert, key)
+    srv.socket = context.wrap_socket(srv.socket, server_side=True)
+    print(f"LYA phone approval: HTTPS port {port}. Open /escalate on your paired phone.")
     srv.serve_forever()
+
 
 if __name__ == "__main__":
     main()

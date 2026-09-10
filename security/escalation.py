@@ -53,9 +53,9 @@ _NONCE = None            # binds a phone grant to THIS escalation request
 CHALLENGE_FILE = os.path.join(_DIR, "escalation_challenge.lya")
 
 
-def _write_challenge(nonce):
+def _write_challenge(nonce, task="Protected action"):
     with open(CHALLENGE_FILE, "wb") as f:
-        f.write(vault.encrypt(json.dumps({"nonce": nonce, "t": time.time()}).encode()))
+        f.write(vault.encrypt(json.dumps({"nonce": nonce, "t": time.time(), "task": task}).encode()))
 
 
 def _clear_challenge():
@@ -240,7 +240,7 @@ def _consume_phone_grant():
     try:
         with open(GRANT_FILE, "rb") as f:
             g = json.loads(vault.decrypt(f.read()))
-        if g.get("used") or time.time() - g.get("t", 0) > GRANT_TTL:
+        if g.get("used") or not 0 <= time.time() - g.get("t", 0) <= GRANT_TTL:
             return False
         # Fail CLOSED: was `if _NONCE and ...`, which accepted any grant
         # whenever no challenge was active. A grant must always name the
@@ -445,3 +445,38 @@ if __name__ == "__main__":
             shutil.copy2(_b, _p)
             os.remove(_b)
         print("(original security word restored)")
+
+
+# Desktop runtime uses phone-only approval; spoken fallback is legacy only.
+import threading
+_request_lock = threading.Lock()
+
+def current_challenge():
+    try:
+        with open(CHALLENGE_FILE, "rb") as f:
+            data = json.loads(vault.decrypt(f.read()))
+        if 0 <= time.time() - data["t"] <= POLL_SECONDS + GRANT_TTL:
+            return data
+    except (OSError, ValueError, KeyError):
+        pass
+    return None
+
+def request_phone(task, cancelled=None, seconds=120):
+    global _NONCE
+    if not _request_lock.acquire(blocking=False):
+        return False
+    try:
+        _NONCE = secrets.token_hex(16)
+        _write_challenge(_NONCE, task)
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if cancelled and cancelled.is_set():
+                return False
+            if _consume_phone_grant():
+                return True
+            time.sleep(0.2)
+        return False
+    finally:
+        _NONCE = None
+        _clear_challenge()
+        _request_lock.release()

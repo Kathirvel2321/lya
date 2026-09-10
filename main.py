@@ -1,419 +1,257 @@
-"""LYA — main entry point.
-Run:  python main.py enroll   (register your face, once)
-      python main.py          (voice mode — wake with 'LYA', sleep with 'go to sleep')
-      python main.py text     (SILENT TEXT MODE — for office/workplaces, no mic needed)
-
-Rules built in:
-- Voice mode: she wakes only when someone says 'LYA'.
-- Text mode: type directly, everything else identical.
-- Anyone can ask simple questions; she answers them casually.
-- Private data / dangerous actions require FACE verification of you.
-- She pushes back if you ask something wrong.
-- 'change primary admin to <name>' transfers admin after you verify."""
-import sys, os
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from audio import voice
-from vision import face_auth, identity
-from brain import memory, mind, knowledge
-import speech_recognition as sr
-from skills import device, guardian, reminder, passwords
-from skills import allskills
-from security import escalation
+"""LYA native desktop runtime. No automatic enrollment and no browser UI.
+python main.py            # voice + native orb
+python main.py text       # native orb with typed commands
+python main.py build      # safe UI preview, synthetic folder data, no sensors
+"""
+import datetime
+import os
+import queue
+import re
+import secrets
+import sys
+import threading
+import time
+from security.policy import Session, allowed
 from ui.orb import LyasFace
+from ui import themes
 
-face = LyasFace()   # her Siri-style interface — appears only when called
-TEXT_MODE = False   # set by command-line arg — silences voice in/out
-BUILD_MODE = False  # building stage: NO face ID, NO passwords, NO gates —
-                    # everyone is a guest and gets casual chat only.
-SESSION = {"role": None, "who": None}   # role: admin / secondary / friend / stranger
-
-
-def identify_visitor():
-    """The Face ID moment: grab a frame, match it against everyone she knows.
-    Unknown faces are AUTO-STORED so the admin can name them later."""
-    try:
-        res = identity.identify(identity.snapshot_jpg())
-    except Exception as e:
-        res = {"role": "stranger", "who": None}
-        print(f"[LYA] camera/identity unavailable: {e}")
-    SESSION["role"], SESSION["who"] = res["role"], res["who"]
-    return res
+HELP = """LYA · available commands
+Show folders · open folder 1 · go back · scroll down · close panel
+Show styles · use theme reactor/halo/pulse · undo theme
+Zoom · shrink · stop · sleep
+What time is it · open calculator · volume up
+Remember <fact> · remember forever <fact> · show memories
+Learn <topic> · save lesson <title> · forget memory <exact key>
+Create skill <description> (draft only)
+Council: <important question>
+Private actions need your enrolled identity and fresh phone approval.
+Build mode previews synthetic folders and styles; it cannot operate your device.
+"""
 
 
-def name_unknowns():
-    """Admin is back — ask who the un-named new faces were, store the names.
-    Only faces the admin actually names are kept; the rest are discarded so
-    strangers don't accumulate in the database forever."""
-    for face_id in identity.pending_ids():
-        say("Someone new talked to me while you were away. What's their name?")
-        nm = ask()
-        if nm:
-            nm = nm.strip().title()
-            identity.name_person(face_id, nm)
-            say(f"Noted — next time {nm} shows up, I'll greet them by name.")
-    identity.clear_pending()
+class Assistant:
+    def __init__(self, face, build=False, voice_enabled=False):
+        self.face, self.build, self.voice_enabled = face, build, voice_enabled
+        self.commands = queue.Queue(maxsize=8)
+        self.cancelled = threading.Event()
+        self.busy = threading.Event()
+        self.session = Session(id=secrets.token_urlsafe(16))
+        self.browser = None
+        self.browse_until = 0
+        self.pending_lesson = None
+        self._reminder_started = False
+        self.generation = 0
+        threading.Thread(target=self._worker, daemon=True).start()
 
+    def submit(self, text):
+        text = text.strip()
+        if not text:return
+        if text.casefold() in {"stop","cancel","sleep","go to sleep","close panel"}:
+            self.cancelled.set()
+            self.generation += 1
+            self.browser=None;self.browse_until=0;self.pending_lesson=None
+            while True:
+                try:self.commands.get_nowait()
+                except queue.Empty:break
+            if "sleep" in text.casefold():self.face.sleep()
+            else:self.face.close_panel();self.face.set_state("cancelled")
+            return
+        if self.busy.is_set():
+            self.face.show_reply("A task is running. Say stop to cancel it before starting another.")
+            return
+        try:self.commands.put_nowait((self.generation,text))
+        except queue.Full:self.face.show_reply("Command queue is full. Say stop and try again.")
 
-def admit(quiet=False):
-    """Gate-keeper: identify the face, greet each role the right way.
-    If the face is NOT visible (person too far / camera can't see) or unknown,
-    she falls back to the PRIMARY SECRET PHRASE — spoken proof beats a dark
-    webcam. Returns True only if the session may continue."""
-    if quiet:
-        voice.set_quiet(True)
-    res = identify_visitor()
-    role, who = res.get("role"), res.get("who")
-    if role in (None, "unknown") or res.get("status") == "no_face":
-        say("I can't see your face clearly. Say the primary phrase if it's you, "
-            "or just tell me what you need as a guest.")
-        heard = ask() or ""
-        # --- VOICEPROOF: face is dark, so let the VOICE decide who spoke.
-        # Even if the words came out garbled, the voiceprint is checked
-        # against the audio of what she just heard — no second recording.
-        if not escalation.check_security_word(heard) == "ok":
+    def _worker(self):
+        while True:
+            generation,text=self.commands.get()
+            if generation != self.generation:continue
+            self.cancelled.clear();self.busy.set();self.face.wake();self.face.set_state("thinking")
             try:
-                from audio import voice_auth
-                wav = voice.get_last_wav()
-                if wav and voice_auth.verify_from_wav(wav):
-                    heard = "__voice_ok__"   # treat as proven boss
+                reply=self.handle(text)
+                if reply and not self.cancelled.is_set():
+                    self.face.show_reply(reply)
+                    # No secret output enters speech; the UI is the default output.
+                    if self.voice_enabled and not getattr(self,"private_output",False):
+                        from audio import voice
+                        voice.speak(reply)
             except Exception as e:
-                # Fail-closed (heard is unchanged, so access is denied), but a
-                # broken voiceprint backend - missing ffmpeg, no enrollment -
-                # looked exactly like "that wasn't your voice". Say which it is.
-                print(f"[LYA][SECURITY] voiceprint check unavailable: {e}")
-        if escalation.check_security_word(heard) == "ok" or heard == "__voice_ok__":
-            SESSION["role"] = "admin"
-            SESSION["who"] = (memory.get_admin() or {}).get("name", "boss")
-            face.wake(handle_wake); face.set_state("listening")
-            say(f"Voice confirmed. Yes {SESSION['who']}, I'm listening.")
-            return True
-        role, who = "stranger", None
-    if role == "admin":
-        face.wake(handle_wake); face.set_state("listening")
-        if identity.pending_ids():
-            name_unknowns()
-        say("Hey boss. Good to see you.")
-        return True
-    if role == "secondary":
-        face.wake(handle_wake); face.set_state("listening")
-        say(f"Welcome back, {who}. Say your password.")
-        pw = ask() or ""
-        if not identity.check_secondary_password(who, pw):
-            say("Wrong password. Private mode stays locked.")
-            face.sleep(); return False
-        say("Access granted — read-only mode.")
-        return True
-    if role == "friend":
-        face.wake(handle_wake); face.set_state("listening")
-        say(f"Hey {who}! Good to see you again.")
-        return True
-    face.wake(handle_wake); face.set_state("listening")
-    say("Hi! I don't think we've met. How can I help you?")
-    return True
+                if not self.cancelled.is_set():
+                    self.face.show_reply(f"Task stopped: {type(e).__name__}: {e}")
+            finally:
+                self.busy.clear();self.face.set_state("idle")
 
+    def identify(self):
+        if self.build:return
+        from vision import identity
+        # No template means guest mode; do not start enrollment or a camera loop.
+        if not os.path.exists(identity.STORE):
+            self.session=Session(id=self.session.id)
+            return
+        result=identity.identify(identity.snapshot_jpg())
+        role=result.get("role") or "stranger"
+        who=result.get("who") or "guest"
+        if (role,who)!=(self.session.role,self.session.person):
+            from brain import mind
+            mind.clear_history(self.session.id)
+            self.session=Session(role,who,secrets.token_urlsafe(16))
+            self.browser=None;self.browse_until=0;self.pending_lesson=None
 
-def say(text):
-    """Speak or print depending on mode."""
-    mind.set_tone(mind.detect_tone(text))   # let the voice match LYA's mood
-    if TEXT_MODE:
-        print(f"LYA >> {text}")
-    else:
-        voice.speak(text)
+    def permit(self, action, task):
+        if self.build:return False
+        if allowed(self.session,action):return True
+        if self.session.role!="admin":return False
+        from security import escalation
+        self.face.set_state("approval")
+        self.face.show_reply("Approve on your paired iPhone:\n\n"+task+"\n\nOpen its HTTPS approval page. Say stop to cancel. This request expires in two minutes.")
+        ok=escalation.request_phone(task,self.cancelled)
+        self.face.set_state("thinking")
+        return allowed(self.session,action,phone_approved=ok) and not self.cancelled.is_set()
 
+    def handle(self,text):
+        self.private_output=False
+        low=text.casefold().strip()
+        if low in {"help","what can you do"}:return HELP
+        if low in {"zoom","lya zoom","open full screen","full screen"}:self.face.expand();return
+        if low in {"shrink","lya shrink","minimize"}:self.face.shrink();return
+        if low in {"show styles","show themes","orb styles"}:self.face.show_styles();return
+        if low in {"what time is it","time","date","what day is it"}:
+            return datetime.datetime.now().strftime("%I:%M %p · %A, %d %B %Y")
+        if self.build:
+            if low=="show folders":
+                self.face.show_folders({"path":"Preview · synthetic folders, no disk access","entries":[{"name":n,"folder":True} for n in ("Projects","Documents","Learning")],"page":1,"more":False});return
+            if low.startswith("use theme "):
+                self.face.apply_theme(low.removeprefix("use theme ").strip());return "Preview applied for this run only."
+            return "Build preview has no device access. Try show folders, show styles, zoom, shrink, or help."
+        self.identify()
+        denied="This requires the primary admin and phone approval. Enrollment remains deferred; no action was taken."
+        if low.startswith("use theme ") or low=="undo theme":
+            name=low.removeprefix("use theme ").strip()
+            if low!="undo theme" and name not in themes.THEMES:return "Choose reactor, halo, or pulse."
+            if not self.permit("theme_apply",text):return denied
+            data=themes.undo() if low=="undo theme" else themes.save(name)
+            self.face.apply_theme(data["theme"]);return "Theme changed. Say undo theme to restore the previous choice."
+        if low in {"show folders","show my folders","show all folders","go back","scroll down","scroll up"} or low.startswith("open folder "):
+            self.private_output=True
+            if self.session.role!="admin":return denied
+            if not self.browser or time.monotonic()>=self.browse_until:
+                if not self.permit("files","Browse my user folder, read-only, for five minutes. No file execution, deletion or system folders."):return denied
+                from skills.files import FolderBrowser
+                self.browser=FolderBrowser();self.browse_until=time.monotonic()+300
+            if self.cancelled.is_set():return
+            if low=="go back":data=self.browser.back()
+            elif low.startswith("scroll "):data=self.browser.scroll(1 if low.endswith("down") else -1)
+            elif low.startswith("open folder "):data=self.browser.open(text[len("open folder "):].strip())
+            else:data=self.browser.listing()
+            if "entries" in data:self.face.show_folders(data);return
+            return f"{data['file']} · {data['bytes']:,} bytes\n{data['message']}"
+        if low.startswith("open ") or low.startswith("volume "):
+            action="volume" if low.startswith("volume ") else "open_app"
+            if not self.permit(action,text):return denied
+            from skills import device
+            return device.volume(low[7:]) if action=="volume" else device.open_app(low[5:])
+        if low.startswith("remind me to ") or low in {"show reminders", "list reminders"}:
+            self.private_output=True
+            if not self.permit("reminders",text):return denied
+            from skills import reminder
+            if not self._reminder_started:
+                # Existing schedules authorize reminders, but public notifications
+                # must not disclose their private contents.
+                def notify_due():
+                    while True:
+                        try:
+                            if reminder.due_now():
+                                self.face.show_reply("A saved reminder is due. Ask to show reminders to view it privately.")
+                        except Exception:
+                            self.face.set_state("reminder error")
+                        threading.Event().wait(30)
+                threading.Thread(target=notify_due,daemon=True).start()
+                self._reminder_started=True
+            if low.startswith("remind me to "):
+                return reminder.add(text) or "Include a time, such as tomorrow at 5pm."
+            return "\n".join(f"{what} · {when}" for _,what,when in reminder.list_all()) or "No reminders."
+        if low in {"screenshot", "take a screenshot"}:
+            self.private_output=True
+            if not self.permit("screenshot",text):return denied
+            from skills import device
+            return device.screenshot()
+        if low.startswith("using my memory "):
+            self.private_output=True
+            if not self.permit("memory_read","Use saved facts to answer this request via the configured language model: "+text[16:]):return denied
+            from brain import mind
+            return mind.reply(text[16:],admin_name=self.session.person,verified=True,remember=False)
+        if low in {"show memories","what do you know","what do you remember"}:
+            self.private_output=True
+            if not self.permit("memory_read",text):return denied
+            from brain import memory
+            rows=memory.recall(limit=30)
+            return "\n\n".join(f"{k} [{kind}]\n{v}" for k,v,kind,_ in rows) or "No saved memories."
+        if low.startswith("remember "):
+            if not self.permit("memory_write",text):return denied
+            from brain import memory
+            protected=low.startswith("remember forever ")
+            content=text[len("remember forever ") if protected else len("remember "):].strip()
+            if not content:return "Tell me what to remember."
+            key=" ".join(content.split()[:6])
+            memory.remember("protected" if protected else "fact",key,content,3 if protected else 2)
+            return f"Saved under {key}. Explicit memories do not expire automatically."
+        if low.startswith("learn "):
+            if not self.permit("learn",text):return denied
+            from brain import mind
+            topic=text[6:].strip()
+            if not topic:return "Name a topic to learn."
+            answer=mind.reply("Explain this topic and distinguish established facts from uncertainty. Do not claim to have searched the web. Topic: "+topic,remember=False)
+            if self.cancelled.is_set():return
+            self.pending_lesson=(answer,time.monotonic()+600,self.session.id)
+            return answer+"\n\nThis is a draft lesson, not verified web research or an installed capability. Say save lesson <title> within ten minutes to retain it."
+        if low.startswith("save lesson "):
+            if not self.pending_lesson or self.pending_lesson[1]<time.monotonic() or self.pending_lesson[2]!=self.session.id:return "No current lesson draft. Say learn <topic> first."
+            if not self.permit("memory_write",text):return denied
+            from brain import memory
+            memory.remember("lesson",text[12:].strip(),self.pending_lesson[0],2)
+            self.pending_lesson=None
+            return "Lesson saved, labelled as model-generated and requiring verification."
+        if low.startswith("forget memory "):
+            self.private_output=True
+            if not self.permit("memory_forget",text):return denied
+            from brain import memory
+            n=memory.forget_exact(text[14:].strip())
+            return f"Removed {n} exact matching memory entries."
+        if low.startswith("create skill "):
+            if not self.permit("skill_draft",text):return denied
+            from skills import forge
+            return forge.create(text[13:].strip())
+        if low in {"confirm skill","activate skill"}:
+            return "Automatic code activation is disabled. Drafts need isolated execution tests and a rollback review before becoming capabilities."
+        if low.startswith("council:"):
+            if not self.permit("council",text):return denied
+            from brain import council
+            result=council.decide(text.split(":",1)[1].strip())
+            return result[0] if result else "The council is unavailable. No decision was executed."
+        if "password" in low or "vault" in low:
+            return "Password operations remain disabled in this development stage. No secrets were read or spoken."
+        from brain import mind
+        return mind.reply(text,admin_name=self.session.person,verified=False,
+                          session_id=self.session.id if self.session.role in {"admin","friend","secondary"} else None)
 
-def ask(prompt=""):
-    """Listen or read depending on mode."""
-    if TEXT_MODE:
-        return input(f"YOU >> {prompt}").lower().strip()
-    return voice.listen()
-
-
-def handle_wake():
-    text = ask()
-    if not text:
-        say("I'm listening."); return
-    t = text.lower().strip()
-
-    # --- BUILD MODE: no verification anywhere. Casual chat / Q&A only. ---
-    if BUILD_MODE:
-        SESSION["role"] = "stranger"   # forces the read-only casual path
-
-    # --- ZOOM CONTROLS: grow the interface to a full HUD / back to orb ---
-    if t in ("lya zoom", "zoom") or ("zoom" in t and "in" in t) or \
-       t in ("open full screen", "full screen", "expand"):
-        face.expand(); return
-    if t in ("lya shrink", "shrink", "shrink down", "go back", "minimize"):
-        face.shrink(); return
-
-    # --- Sleep command: interface fades away ---
-    if any(p in text for p in ("go to sleep", "sleep now", "close interface",
-                               "dismiss", "that's all")):
-        say("Going dark. Call my name whenever you need me.")
-        face.sleep()
-        return
-
-    # --- SENSITIVE-TASK GATE: phone approval OR spoken security word, or nothing runs ---
-    SENSITIVE = ("password", "change", "admin", "open ", "close ", "volume ",
-                 "screenshot", "remember", "what do you know", "shutdown", "delete",
-                 "hack", "scan", "exploit", "payload", "install", "nmap")
-    if SESSION["role"] == "admin" and any(s in text for s in SENSITIVE):
-        if not escalation.escalate(say, ask, task_hint=text):
-            face.sleep()
-            return   # task frozen — no work until identity is proven
-
-    # --- NON-ADMIN SESSIONS: READ-ONLY. No device control, no memory writes, no admin. ---
-    if SESSION["role"] in ("friend", "stranger"):
-        say(mind.reply(text, verified=False)); return
-    if SESSION["role"] == "secondary":
-        if "password" in text:                              # read-only vault access
-            rows = passwords.list_all()
-            say("Read-only vault — " + ("; ".join(f"{s}: {p}" for s, p in rows)
-                                        if rows else "it's empty."))
-        elif "remind" in text and any(w in text for w in ("list", "what are", "do i have", "show")):
-            rows = reminder.list_all()
-            say("You have " + ("; ".join(f"{w} on {t}" for _, w, t in rows)
-                               if rows else "no reminders.") + ".")
-        else:
-            say(mind.reply(text, verified=False))
-        return
-    # --- ADMIN-ONLY: password vault (write) ---
-    if "password" in text:
-        if any(w in text for w in ("save", "store", "add")):
-            say("Which site or app?"); site = ask()
-            say("Say the password."); pw = ask()
-            if site and pw:
-                say(passwords.save(site, pw))
-        else:
-            rows = passwords.list_all()
-            say("; ".join(f"{s}: {p}" for s, p in rows) if rows else "Your vault is empty.")
-        return
-    # --- Admin transfer (the 'change my primary admin' command) ---
-    if "change" in text and "admin" in text:
-        if face_auth.verify() and SESSION["role"] == "admin":
-            memory.set_admin("new_admin")
-            say("Primary admin transferred. New admin enrolled — I serve them now.")
-        else:
-            say("Admin transfer requires your face. Request denied.")
-        return
-
-    # --- Casual questions: anyone can ask these ---
-    if any(w in text for w in ("time", "date", "weather", "who are you", "hello")):
-        if "who are you" in text:
-            say(f"I am LYA, {memory.get_admin()['name']}'s personal assistant.")
-        elif "weather" in text:
-            say(device.search_web("weather today"))
-        else:
-            say(mind.reply(text, verified=False))
-        return
-
-    # --- Everything else: verify it's YOU first ---
-    correction = guardian.correct_user(text)
-    if correction:
-        say(correction)
-        conf = ask()
-        if conf and "confirm" in conf and face_auth.verify():
-            pass
-        else:
-            say("Cancelled."); return
-
-    # --- Reminders: 'remind me to X tomorrow at 5pm' (exact-moment alarms) ---
-    if "remind" in text or "reminder" in text:
-        if "cancel" in text or "delete" in text:
-            say(reminder.cancel(text.split("cancel")[-1].split("delete")[-1].strip(" the my ")))
-        elif any(w in text for w in ("list", "what are", "do i have", "show")):
-            rows = reminder.list_all()
-            say("You have " + ("; ".join(f"{w} on {t}" for _, w, t in rows)
-                               if rows else "no reminders set. All clear.") + ".")
-        else:
-            reply = reminder.add(text)
-            say(reply or "When should I remind you? Say a time like 'tomorrow at 5pm'.")
-        return
-
-    if "remember" in text:                      # teach her something
-        fact = text.replace("remember", "").strip()
-        memory.remember("fact", fact.split()[0] if fact else "note", fact, importance=2)
-        knowledge.ingest("remember forever " + fact)   # hub classifies + graphs it
-        say("Stored in my memory. I won't forget.")
-        return
-
-    if "what do you know" in text:              # private recall — needs face
-        if face_auth.verify():
-            rows = memory.recall(limit=5)
-            say("Here's what I remember: " + "; ".join(v for _, v, *_ in rows))
-        else:
-            say("That's private. Identity failed.")
-        return
-
-    # --- PHONE CONTROL: remote hands via paired Termux agent ---
-    if text.lower().startswith(("phone", "grant phone", "revoke phone")):
-        try:
-            from skills import phone
-        except ImportError:
-            import skills.phone as phone
-        reply = phone.handle(text)
-        if reply is not None:
-            say(reply); return
-    if text.startswith(("open ", "close ", "volume ")):
-        verb, rest = text.split(" ", 1)
-        allowed, msg = guardian.guard(text, lambda: device.HANDS[verb](rest))
-        say(msg); guardian.log_action(text, allowed)
-        return
-
-    # --- ALL-ROUNDER SKILLS: cooking / guiding / teaching / techno / hacker ---
-    skill_reply = allskills.reply(text, say, ask)
-    if skill_reply is not None:
-        say(skill_reply)
-        return
-
-    if "search" in text:
-        q = text.split("search", 1)[1].strip()
-        say(device.search_web(q)); return
-
-    if "screenshot" in text:
-        say(device.screenshot()); return
-
-    # --- knowledge status: what's in the hub, what's protected ---
-    if "knowledge status" in text or "memory status" in text:
-        s = knowledge.stats()
-        say(f"Hub: {s.get('session', 0)} session, {s.get('knowledge', 0)} knowledge, "
-            f"{s.get('topic', 0)} topics, {knowledge.protect_count()} protected. "
-            "Protected items can never be auto-deleted.")
-        return
-
-    # --- cleanup: the safe sweep — removes only expired ephemera, never protected ---
-    if "cleanup" in text and ("memory" in text or "brain" in text):
-        if face_auth.verify():
-            say(knowledge.maintenance())
-        else:
-            say("Cleanup needs your face verified — it touches memory.")
-        return
-
-    # default: think + answer with full memory
-    # (BUILD_MODE: never touch the camera — answer as an unverified guest)
-    say(mind.reply(text, memory.get_admin()["name"] if memory.get_admin() else "admin",
-                   verified=False if BUILD_MODE else face_auth.verify()))
-    knowledge.ingest(text)   # classify + route: ephemeral chats never touch disk
-
-def text_mode():
-    """SILENT MODE — for office/workplaces. Chat by typing, no mic needed.
-    Same brain, same memory, same guardian — just no voice in or out."""
-    admin = memory.get_admin()
-    name = admin["name"] if admin else "you"
-    print("=" * 55)
-    print(f"  LYA TEXT MODE — silent office chat with {name}")
-    print("  Type 'exit' to leave | 'go to sleep' closes her orb")
-    print("=" * 55)
-    reminder.start_watcher(say)
-    while True:
-        text = input("YOU >> ").lower().strip()
-        if not text:
-            continue
-        if text in ("exit", "quit", "bye"):
-            print("LYA >> See you later. I'll remember everything.")
-            break
-        face.wake(handle_wake)      # orb appears while working
-        face.set_state("thinking")
-        handle_wake_input(text)
-        face.sleep()                # orb hides again after each answer
-
-def handle_wake_input(text):
-    """Run the same logic as voice mode but with a pre-set text."""
-    original_ask = globals()["ask"]
-    globals()["_pending"] = text
-    def fake_ask(prompt=""):
-        t = globals().get("_pending")
-        globals()["_pending"] = None
-        return t if t else None
-    globals()["ask"] = fake_ask
-    try:
-        handle_wake()
-    finally:
-        globals()["ask"] = original_ask
 
 def main():
-    admin = memory.get_admin()
-    if not admin:
-        name = input("First boot — what should I call you? ")
-        memory.set_admin(name)
-        print("Now enrolling your face (put it in front of the webcam)...")
-        face_auth.enroll(name)
-        # Enrollment is the ROOT of every later identity check. If it fails and
-        # we continue anyway, the face database stays empty, identify() matches
-        # nobody, and the whole gate silently degrades to the spoken fallback.
-        # So: retry, then abort. Never boot into a half-enrolled state.
-        for attempt in range(1, 4):
+    try:sys.stdout.reconfigure(encoding="utf-8",errors="replace")
+    except AttributeError:pass
+    mode=sys.argv[1] if len(sys.argv)>1 else "voice"
+    if mode not in {"voice","text","build"}:
+        raise SystemExit("Use python main.py [voice|text|build]. Enrollment is deferred.")
+    face=LyasFace()
+    assistant=Assistant(face,build=mode=="build",voice_enabled=mode=="voice")
+    if mode=="voice":
+        def listen():
             try:
-                identity.enroll_admin(identity.snapshot_jpg(), name)
-                print("Face ID database ready — you are the one and only admin.")
-                break
+                from audio import voice
+                voice.wake_loop(lambda text,quiet=False:assistant.submit(text))
             except Exception as e:
-                print(f"  Face enrollment attempt {attempt}/3 failed: {e}")
-                if attempt < 3:
-                    input("  Face the webcam in good light, then press Enter to retry...")
-        else:
-            memory.clear_admin()   # roll back — do not leave a half-made admin
-            sys.exit("Face enrollment failed 3 times. Nothing was saved. "
-                     "Check the webcam and lighting, then run 'python main.py' again.")
-        voice.speak(f"Hello {name}. My memory is empty — teach me, and I'll grow.")
+                face.show_reply(f"Voice unavailable ({e}). Type commands in the orb.")
+        threading.Thread(target=listen,daemon=True).start()
+    face.run(assistant.submit,preview=mode!="voice")
 
-    def wake_with_face(quiet=False):
-        """She opens her interface for whoever summoned her — Face ID first,
-        then the greeting that matches who it is. quiet=True = wake with a
-        keyword that keeps her silent until earphones are found."""
-        if not admit(quiet):
-            return
-        handle_wake()
 
-    reminder.start_watcher(say)   # she never sleeps on a reminder
-    voice.wake_loop(wake_with_face)
-
-if __name__ == "__main__":
-    try:   # Windows console: mind's replies may hold fancy Unicode
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
-    arg = sys.argv[1] if len(sys.argv) > 1 else ""
-    if arg == "enroll":
-        face_auth.enroll()
-    elif arg == "text":
-        TEXT_MODE = True
-        text_mode()
-    elif arg == "build":
-        # python main.py build — BUILD STAGE: no face ID, no passwords,
-        # no sensitive gates. Anyone can chat and ask questions freely.
-        BUILD_MODE = True
-        TEXT_MODE = True
-        text_mode()
-    elif arg == "setsecurityword":
-        # python main.py setsecurityword <word>  — the spoken fallback phrase
-        if len(sys.argv) >= 3:
-            escalation.set_security_word(sys.argv[2])
-            print("Security word set (stored only as an encrypted hash).")
-        else:
-            print("Usage: python main.py setsecurityword <word>")
-    elif arg == "enrollvoice":
-        # python main.py enrollvoice  — record 3 samples of your voice so the
-        # voiceprint fallback works when your face isn't visible.
-        from audio import voice_auth
-        samples = []
-        for i in range(3):
-            print(f"Sample {i+1}/3 — speak naturally for ~4 seconds...")
-            voice.speak("Listening")
-            r = sr.Recognizer()
-            try:
-                wav = voice._record(4)
-                samples.append(wav.getvalue())
-            except Exception:
-                pass
-        print("Voice enrolled." if voice_auth.enroll_from_wav(samples)
-              else "Enrollment failed — try again in a quiet room.")
-    elif arg == "secondary":
-        # python main.py secondary <name> <password>  — register a trusted read-only user
-        if len(sys.argv) >= 4:
-            identity.set_secondary_password(sys.argv[2], sys.argv[3])
-            print(f"Secondary user '{sys.argv[2]}' registered (read-only access).")
-        else:
-            print("Usage: python main.py secondary <name> <password>")
-    else:
-        main()
+if __name__=="__main__":main()

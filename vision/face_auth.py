@@ -16,8 +16,9 @@ STORE = os.path.join(os.path.dirname(__file__), "admin_face.npy.lya")
 _status_callback = None          # fn(state:str, detail:str) -> None
 
 def set_status_callback(fn):
-    ""Register a callback so LYA's interface shows 'scanning' states.
-    States: 'scanning' | 'scanned_ok' | 'scanned_fail'.""
+    """Register a callback so LYA's interface shows 'scanning' states.
+    States: 'scanning' | 'scanned_ok' | 'scanned_fail'.
+    """
     global _status_callback
     _status_callback = fn
 
@@ -87,7 +88,7 @@ def verify_from_jpg(jpg_bytes, threshold=0.12):
     """One-shot check of an iPhone photo against the stored admin face."""
     if not os.path.exists(STORE):
         return False, 1.0
-    stored = np.frombuffer(vault.decrypt_file(STORE)).reshape(128, 128)
+    stored = np.frombuffer(vault.decrypt_file(STORE), dtype=np.float32).reshape(128, 128)
     vec = _face_vector_from_jpg(jpg_bytes)
     if vec is None:
         return False, 1.0
@@ -99,7 +100,7 @@ def verify(threshold=0.12, tries=15):
     if not os.path.exists(STORE):
         print("[LYA] No face enrolled yet — run enroll() first.")
         return False
-    stored = np.frombuffer(vault.decrypt_file(STORE)).reshape(128, 128)
+    stored = np.frombuffer(vault.decrypt_file(STORE), dtype=np.float32).reshape(128, 128)
     cam = cv2.VideoCapture(0)
     detector = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
     confirmed = 0

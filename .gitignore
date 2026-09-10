@@ -39,3 +39,12 @@ skills/_build.err
 examples/*.pdf
 examples/*.txt
 examples/*.mp4
+
+# Runtime settings, encrypted transaction locks and skill drafts
+data/appearance.json
+data/appearance.tmp
+*.lya.lock
+*.lya.tmp
+skills/forge_draft.py
+skills/forge_meta.json
+skills/forged_skill.py

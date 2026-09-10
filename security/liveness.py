@@ -49,7 +49,7 @@ def face_liveness(image_bytes, threshold=0.5):
     still makes the real/fake decision."""
     checker_pack = _get_face_checker()
     if not checker_pack:
-        return True, 0.0, "liveness model unavailable (allowed through)"
+        return False, 0.0, "liveness model unavailable; verification denied"
     checker, cropper, model_dir = checker_pack
     img = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
     if img is None:
@@ -77,7 +77,7 @@ def face_liveness(image_bytes, threshold=0.5):
             prediction += pred
         label = int(np.argmax(prediction))
         value = float(prediction[0][label] / 2)
-        is_live = (label == 1)
+        is_live = (label == 1 and value >= threshold)
         return is_live, value, f"liveness label={label} conf={value:.2f}"
     except Exception as e:
         return False, 0.0, f"liveness error: {e}"

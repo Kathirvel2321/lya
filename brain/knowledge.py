@@ -100,7 +100,7 @@ def ingest(text, skill="general"):
     Classifies, stores what's worth storing, links it into the graph.
     Returns the classification (so the UI can show 'ephemeral — not stored')."""
     cls = classify(text)
-    if cls == "ephemeral":
+    if cls in ("ephemeral", "session"):
         return cls                      # ZERO disk writes — no overload possible
     now = datetime.datetime.now()
     topic = _topic_of(text)
@@ -148,7 +148,8 @@ def query(text, limit=5):
     low = text.lower()
     words = set(re.findall(r"[a-z0-9]+", low)) - {"what", "about", "is", "the", "my", "where", "stored"}
     hits = []
-    for t, topic, when in _protect_read():
+    for item in _protect_read():
+        t, topic = item["text"], item["topic"]
         blob = (t + " " + topic).lower()
         if words & set(re.findall(r"[a-z0-9]+", blob)):
             hits.append((3.0, topic, t, "protected"))

@@ -19,6 +19,7 @@ import re
 
 from skills import (cooking, guiding, teaching, techno, hacker, autonomous,
                     kali, learnhack, security_brain, home, forge, harden)
+from brain import council as _council
 
 def _forged():
     """Dynamically load the skill Lya forged (if activated & valid)."""
@@ -31,6 +32,7 @@ def _forged():
     return None
 
 _SKILLS = [
+    (_council.match,   _council.reply),
     (harden.match,     harden.reply) if hasattr(harden, 'match') else None,
     (forge.match,      forge.reply),
     (home.match,       home.reply),

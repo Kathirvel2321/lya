@@ -21,12 +21,9 @@ META = os.path.join(HERE, "forge_meta.json")
 LOG = os.path.join(HERE, "lya_actions.log.lya")
 
 def _log(what, ok=True):
-    try:
-        with open(LOG, "a", encoding="utf-8") as f:
-            f.write(f"{datetime.datetime.now().isoformat()} | FORGE | "
-                    f"{'OK' if ok else 'DENIED'} | {what}\n")
-    except Exception:
-        pass
+    from skills.guardian import log_action
+    log_action("FORGE " + what, ok)
+
 
 def _groq(prompt):
     """Ask Lya's brain (Groq) to write the skill code."""
@@ -76,32 +73,11 @@ def create(desc):
     _log(f"draft: {desc}")
     return ("🛠️ SKILL DRAFTED (not active yet). Here's what I wrote — review it:\n\n"
             + code[:1800] + ("\n... (truncated — full file: skills/forge_draft.py)" if len(code) > 1800 else "")
-            + "\n\nSay 'confirm skill' to activate it, or 'discard skill' to throw it away.")
+            + "\n\nDraft only. Activation is disabled pending isolated tests and rollback review.")
 
 def activate():
-    if not os.path.exists(DRAFT):
-        return "No pending skill draft. Say 'create skill <what it should do>' first."
-    try:
-        with open(DRAFT) as f:
-            compile(f.read(), "forge_draft.py", "exec")
-    except SyntaxError as e:
-        _log("activate syntax-fail", False)
-        return f"🛠️ Syntax error in the draft ({e}) — not activating. Say 'discard skill' and try again."
-    name = _meta().get("pending_desc", "custom skill")
-    final = os.path.join(HERE, "forged_skill.py")
-    with open(DRAFT, "r", encoding="utf-8") as f:
-        code = f.read()
-    with open(final, "w", encoding="utf-8") as f:
-        f.write(code)
-    try:
-        import skills.forged_skill as fs
-        importlib.reload(fs)
-    except Exception as e:
-        _log("activate import-fail", False)
-        return f"🛠️ The skill failed to load ({e}) — not activated. Review skills/forge_draft.py."
-    _log(f"activated: {name}")
-    return (f"✅ SKILL ACTIVATED — LYA can now handle it! Tested with:\n"
-            f"  {fs.reply('hello')}")
+    return "Activation is disabled until isolated tests and rollback review are implemented. The draft has not executed."
+
 
 def discard():
     for p in (DRAFT,):

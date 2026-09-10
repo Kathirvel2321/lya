@@ -3,3 +3,39 @@ __pycache__/
 .venv/
 venv/
 
+# --- SECRETS: never commit. DPAPI-wrapped key, API keys, auth tokens/hashes.
+security/.lya_key
+security/*.lya
+*.lya
+
+# --- BIOMETRICS: voice recordings and face templates are auth material.
+debug/
+*.wav
+*.npy
+
+# --- PERSONAL DATA: memory brain, reminders, logs, screenshots.
+brain/*.db
+brain/*.db.lya
+data/*.db
+skills/reminders.csv
+skills/hacker_progress.txt
+skills/book_knowledge.txt.gz
+shots/
+*.log
+
+# --- NETWORK FINGERPRINT: gateway + device MACs identify your home.
+skills/.home_baseline.json
+skills/.oui_cache.json
+
+# --- Build noise
+skills/_build.log
+skills/_build.err
+
+# --- Local editor / agent config
+.vscode/
+.claude/
+
+# --- Copyrighted reference material — do not redistribute.
+examples/*.pdf
+examples/*.txt
+examples/*.mp4

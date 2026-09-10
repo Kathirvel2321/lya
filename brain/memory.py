@@ -105,6 +105,13 @@ def set_admin(name, face_encoding=None, voice_path=None):
                vault.encrypt_text(voice_path) if voice_path else None))
     _close(c)
 
+def clear_admin():
+    """Roll back a half-finished enrollment. Used when face enrollment fails on
+    first boot — better no admin at all than an admin with no face on file."""
+    c = _conn()
+    c.execute("DELETE FROM admin")
+    _close(c)
+
 def get_admin():
     c = _conn()
     row = c.execute("SELECT name, face_encoding, voice_path FROM admin WHERE id=1").fetchone()

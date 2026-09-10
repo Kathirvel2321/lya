@@ -24,6 +24,8 @@ from ui.orb import LyasFace
 
 face = LyasFace()   # her Siri-style interface — appears only when called
 TEXT_MODE = False   # set by command-line arg — silences voice in/out
+BUILD_MODE = False  # building stage: NO face ID, NO passwords, NO gates —
+                    # everyone is a guest and gets casual chat only.
 SESSION = {"role": None, "who": None}   # role: admin / secondary / friend / stranger
 
 
@@ -40,14 +42,17 @@ def identify_visitor():
 
 
 def name_unknowns():
-    """Admin is back — ask who the un-named new faces were, store the names."""
-    for face_id in list(identity.name_pending):
+    """Admin is back — ask who the un-named new faces were, store the names.
+    Only faces the admin actually names are kept; the rest are discarded so
+    strangers don't accumulate in the database forever."""
+    for face_id in identity.pending_ids():
         say("Someone new talked to me while you were away. What's their name?")
         nm = ask()
         if nm:
-            identity.name_person(face_id, nm.strip().title())
-            say(f"Noted — next time {nm.strip().title()} shows up, I'll greet them by name.")
-    identity.name_pending.clear()
+            nm = nm.strip().title()
+            identity.name_person(face_id, nm)
+            say(f"Noted — next time {nm} shows up, I'll greet them by name.")
+    identity.clear_pending()
 
 
 def admit(quiet=False):
@@ -72,8 +77,11 @@ def admit(quiet=False):
                 wav = voice.get_last_wav()
                 if wav and voice_auth.verify_from_wav(wav):
                     heard = "__voice_ok__"   # treat as proven boss
-            except Exception:
-                pass
+            except Exception as e:
+                # Fail-closed (heard is unchanged, so access is denied), but a
+                # broken voiceprint backend - missing ffmpeg, no enrollment -
+                # looked exactly like "that wasn't your voice". Say which it is.
+                print(f"[LYA][SECURITY] voiceprint check unavailable: {e}")
         if escalation.check_security_word(heard) == "ok" or heard == "__voice_ok__":
             SESSION["role"] = "admin"
             SESSION["who"] = (memory.get_admin() or {}).get("name", "boss")
@@ -83,7 +91,7 @@ def admit(quiet=False):
         role, who = "stranger", None
     if role == "admin":
         face.wake(handle_wake); face.set_state("listening")
-        if identity.name_pending:
+        if identity.pending_ids():
             name_unknowns()
         say("Hey boss. Good to see you.")
         return True
@@ -125,6 +133,18 @@ def handle_wake():
     text = ask()
     if not text:
         say("I'm listening."); return
+    t = text.lower().strip()
+
+    # --- BUILD MODE: no verification anywhere. Casual chat / Q&A only. ---
+    if BUILD_MODE:
+        SESSION["role"] = "stranger"   # forces the read-only casual path
+
+    # --- ZOOM CONTROLS: grow the interface to a full HUD / back to orb ---
+    if t in ("lya zoom", "zoom") or ("zoom" in t and "in" in t) or \
+       t in ("open full screen", "full screen", "expand"):
+        face.expand(); return
+    if t in ("lya shrink", "shrink", "shrink down", "go back", "minimize"):
+        face.shrink(); return
 
     # --- Sleep command: interface fades away ---
     if any(p in text for p in ("go to sleep", "sleep now", "close interface",
@@ -270,8 +290,9 @@ def handle_wake():
         return
 
     # default: think + answer with full memory
+    # (BUILD_MODE: never touch the camera — answer as an unverified guest)
     say(mind.reply(text, memory.get_admin()["name"] if memory.get_admin() else "admin",
-                   verified=face_auth.verify()))
+                   verified=False if BUILD_MODE else face_auth.verify()))
     knowledge.ingest(text)   # classify + route: ephemeral chats never touch disk
 
 def text_mode():
@@ -317,11 +338,23 @@ def main():
         memory.set_admin(name)
         print("Now enrolling your face (put it in front of the webcam)...")
         face_auth.enroll(name)
-        try:
-            identity.enroll_admin(identity.snapshot_jpg())
-            print("Face ID database ready — you are the one and only admin.")
-        except Exception as e:
-            print(f"Face ID enrollment skipped: {e}")
+        # Enrollment is the ROOT of every later identity check. If it fails and
+        # we continue anyway, the face database stays empty, identify() matches
+        # nobody, and the whole gate silently degrades to the spoken fallback.
+        # So: retry, then abort. Never boot into a half-enrolled state.
+        for attempt in range(1, 4):
+            try:
+                identity.enroll_admin(identity.snapshot_jpg(), name)
+                print("Face ID database ready — you are the one and only admin.")
+                break
+            except Exception as e:
+                print(f"  Face enrollment attempt {attempt}/3 failed: {e}")
+                if attempt < 3:
+                    input("  Face the webcam in good light, then press Enter to retry...")
+        else:
+            memory.clear_admin()   # roll back — do not leave a half-made admin
+            sys.exit("Face enrollment failed 3 times. Nothing was saved. "
+                     "Check the webcam and lighting, then run 'python main.py' again.")
         voice.speak(f"Hello {name}. My memory is empty — teach me, and I'll grow.")
 
     def wake_with_face(quiet=False):
@@ -336,10 +369,20 @@ def main():
     voice.wake_loop(wake_with_face)
 
 if __name__ == "__main__":
+    try:   # Windows console: mind's replies may hold fancy Unicode
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     arg = sys.argv[1] if len(sys.argv) > 1 else ""
     if arg == "enroll":
         face_auth.enroll()
     elif arg == "text":
+        TEXT_MODE = True
+        text_mode()
+    elif arg == "build":
+        # python main.py build — BUILD STAGE: no face ID, no passwords,
+        # no sensitive gates. Anyone can chat and ask questions freely.
+        BUILD_MODE = True
         TEXT_MODE = True
         text_mode()
     elif arg == "setsecurityword":

@@ -9,7 +9,7 @@ this token + your Windows DPAPI key + face verification for private data).
 Run:  python web_server.py
 Then on iPhone:  http://<your-pc-ip>:5000  -> share -> Add to Home Screen
 """
-import os, sys, json, socket
+import os, sys, json, socket, time, hmac, secrets
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -21,7 +21,29 @@ from audio import voice_auth
 from security import escalation
 import base64, re
 
-_session = {"verified": False}   # verified by iPhone Face+Voice this session
+# ---- per-client verified sessions ------------------------------------------
+# This used to be a single module-global {"verified": False}. One successful
+# face check flipped it True for the WHOLE SERVER - every client, every later
+# request, forever, until restart. Nothing ever reset it. Now each successful
+# verification mints an opaque, expiring session id bound to that one client.
+SESSION_TTL = 600          # a face check is worth 10 minutes, then re-verify
+_sessions = {}             # sid -> expiry timestamp
+
+
+def _new_session():
+    sid = secrets.token_urlsafe(24)
+    _sessions[sid] = time.time() + SESSION_TTL
+    return sid
+
+
+def _session_valid(sid):
+    """True only for a live, unexpired sid. Reaps expired entries on the way
+    through so the dict can't grow without bound on a long-running server."""
+    now = time.time()
+    for k, exp in list(_sessions.items()):
+        if exp <= now:
+            del _sessions[k]
+    return bool(sid) and _sessions.get(sid, 0) > now
 
 # ---- the access token: only YOUR phone knows this ----
 TOKEN_FILE = os.path.join(os.path.dirname(__file__), "security", "phone_token.lya")
@@ -75,10 +97,13 @@ async function send(){
   const q = document.getElementById('q').value.trim(); if(!q) return;
   document.getElementById('q').value='';
   add(q,'you');
+  const SID = localStorage.getItem('lya_sid') || '';
   const r = await fetch('/ask',{method:'POST',
     headers:{'Content-Type':'application/x-www-form-urlencoded'},
-    body:'token='+encodeURIComponent(TOKEN)+'&q='+encodeURIComponent(q)});
+    body:'token='+encodeURIComponent(TOKEN)+'&sid='+encodeURIComponent(SID)
+        +'&q='+encodeURIComponent(q)});
   const j = await r.json();
+  if(j.verified === false) localStorage.removeItem('lya_sid');  // expired - re-verify
   add(j.error ? 'â›” '+j.error : j.reply, 'lya');
 }
 function add(t,c){const d=document.createElement('div');d.className='msg '+c;
@@ -152,7 +177,8 @@ VERIFY_HTML = VERIFY_HTML.replace("""async function step1(){
 }""", """async function step1(){
   say('Look at the camera...');
   const j=await post('/verify_identity','frame='+encodeURIComponent(grabFrame()));
-  say(j.ok ? 'IDENTITY CONFIRMED - welcome, '+(j.name||'admin') : 'ACCESS DENIED: '+(j.error||'not recognized'));
+  if(j.ok && j.sid) localStorage.setItem('lya_sid', j.sid);
+  say(j.ok ? 'IDENTITY CONFIRMED - welcome, '+(j.name||'admin')+' (valid '+((j.ttl||600)/60)+' min)' : 'ACCESS DENIED: '+(j.error||'not recognized'));
 }""")
 # verify page records voice too
 VERIFY_HTML = VERIFY_HTML.replace("Face stored on the laptop", "Face OK")
@@ -168,14 +194,27 @@ step2 = async function(){
   const ab=await new Blob(chunks).arrayBuffer();
   const u8=new Uint8Array(ab);let s='';for(const b of u8)s+=String.fromCharCode(b);
   const j=await post('/verify_identity','frame='+encodeURIComponent(grabFrame())+'&wav='+encodeURIComponent(btoa(s)));
+  if(j.ok && j.sid) localStorage.setItem('lya_sid', j.sid);
   say(j.ok ? 'IDENTITY CONFIRMED - welcome, '+(j.name||'admin') : 'ACCESS DENIED: '+(j.error||''));
 }""")
 
-def lyas_answer(q):
-    """Same brain, same guardian - one gateway for the phone."""
+_NEEDS_FACE = ("That touches your private memory. Open /verify on this phone and "
+               "show me your face first - the access token proves it's your "
+               "phone, not that it's you holding it.")
+
+
+def lyas_answer(q, verified=False):
+    """Same brain, same guardian - one gateway for the phone.
+
+    `verified` comes from a live /verify_identity session, NEVER from the access
+    token alone. The token proves 'this is the paired phone'; only the face
+    check proves 'this is the owner holding it'. Reading or writing private
+    memory requires the latter."""
     low = q.lower()
     if "remember" in low or "my " in low[:4]:
         # "my age is 19", "my birthday is 12 march", "my exam is on..."
+        if not verified:
+            return _NEEDS_FACE
         fact = q.strip()
         key = "birthday" if "birthday" in low or "birth" in low else \
               "age" if "age" in low else \
@@ -183,17 +222,22 @@ def lyas_answer(q):
         memory.remember("fact", key, fact, importance=3)
         return f"Stored: '{fact}'. I'll keep this in mind - and update it when things change."
     if "what do you know" in low or "what do you remember" in low:
+        if not verified:
+            return _NEEDS_FACE
         rows = memory.recall(limit=8)
         return "Here's what I remember: " + "; ".join(v for _, v, *_ in rows)
     if "birthday" in low or "wish" in low:
+        if not verified:
+            return _NEEDS_FACE
         rows = memory.recall(limit=20)
         facts = [v for _, v, *_ in rows if "birthday" in v.lower() or "birth" in v.lower()]
         if facts:
             return f"Of course I remember - {facts[0]}. I will wish you the moment the day comes."
         return "You haven't told me your birthday yet - tell me and I'll never forget it."
     reply = mind.reply(q, memory.get_admin()["name"] if memory.get_admin() else "admin",
-                       verified=_session["verified"])
-    memory.remember("conversation", low[:30], low)
+                       verified=verified)
+    if verified:      # unverified chatter must not pollute the memory brain
+        memory.remember("conversation", low[:30], low)
     return reply
 
 def _b64_to_bytes(s):
@@ -221,7 +265,9 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(200, HTML)
 
     def _check_token(self, data):
-        if data.get("token", [""])[0] != TOKEN:
+        # compare_digest, not ==: a plain string compare short-circuits on the
+        # first wrong byte and leaks the token one character at a time.
+        if not hmac.compare_digest(data.get("token", [""])[0], TOKEN):
             self._send(403, json.dumps({"error": "wrong token - access denied"}), "application/json")
             return False
         return True
@@ -263,9 +309,9 @@ class Handler(BaseHTTPRequestHandler):
                 if voice_auth.enrolled() and not voice_auth.verify_from_wav(wav):
                     ok = False
             if ok:
-                _session["verified"] = True
                 admin = memory.get_admin()
-                return self._send(200, json.dumps({"ok": True,
+                return self._send(200, json.dumps({"ok": True, "sid": _new_session(),
+                    "ttl": SESSION_TTL,
                     "name": admin["name"] if admin else "admin"}), "application/json")
             return self._send(200, json.dumps({"ok": False,
                 "error": f"face/voice not recognized (dist={dist:.3f})"}), "application/json")
@@ -290,11 +336,13 @@ class Handler(BaseHTTPRequestHandler):
 
         # /ask
         q = data.get("q", [""])[0].strip()
+        verified = _session_valid(data.get("sid", [""])[0])
         try:
-            reply = lyas_answer(q)
+            reply = lyas_answer(q, verified)
         except Exception as e:
             reply = f"My brain hiccuped: {e}"
-        self._send(200, json.dumps({"reply": reply}), "application/json")
+        self._send(200, json.dumps({"reply": reply, "verified": verified}),
+                   "application/json")
 
     def log_message(self, *a):   # quiet logs
         pass
